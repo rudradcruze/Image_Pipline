@@ -345,7 +345,7 @@ class FeatureExtractor(nn.Module):
         return self.model(x)
 
 # ================== Feature Extraction ==================
-def extract_features(dataset, model, batch_size=32, device=Config.DEVICE):
+def extract_features_with_resnet50(dataset, model, batch_size=32, device=Config.DEVICE):
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -361,13 +361,11 @@ def extract_features(dataset, model, batch_size=32, device=Config.DEVICE):
             images = images.to(device)
             outputs = model(images)
             features.append(outputs.cpu().numpy())
-
-            # Ensure targets are reshaped properly if they are single values
             labels.append(targets.cpu().numpy())
 
     # Combine all batches into single arrays
     features = np.vstack(features)
-    labels = np.concatenate(labels)  # Use np.concatenate for 1D labels
+    labels = np.concatenate(labels)
 
     # Save features and labels to CSV
     feature_columns = [f"feature_{i}" for i in range(features.shape[1])]
@@ -396,6 +394,143 @@ def visualize_augmentations(dataset, num_samples=5):
         ax[i].axis("off")
     plt.show()
 
+# ================== Training VGG16 on Extracted Features ==================
+def train_vgg16_on_features(features, labels, num_classes, epochs=10, batch_size=32, device=Config.DEVICE):
+    """
+    Train a VGG16 model on the extracted features.
+    """
+    logger.info("Training VGG16 on extracted features...")
+
+    # Split data into training and testing sets
+    from sklearn.model_selection import train_test_split
+    X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
+
+    # Convert data to PyTorch tensors
+    X_train = torch.tensor(X_train, dtype=torch.float32).to(device)
+    X_test = torch.tensor(X_test, dtype=torch.float32).to(device)
+    y_train = torch.tensor(y_train, dtype=torch.long).to(device)
+    y_test = torch.tensor(y_test, dtype=torch.long).to(device)
+
+    # Initialize VGG16 model
+    vgg16 = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
+    vgg16.classifier[6] = nn.Linear(vgg16.classifier[6].in_features, num_classes)  # Adjust output layer
+    vgg16 = vgg16.to(device)
+
+    # Define loss function and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(vgg16.parameters(), lr=0.001)
+
+    # Training loop
+    for epoch in range(epochs):
+        vgg16.train()
+        running_loss = 0.0
+        for i in range(0, len(X_train), batch_size):
+            inputs = X_train[i:i + batch_size]
+            targets = y_train[i:i + batch_size]
+
+            optimizer.zero_grad()
+            outputs = vgg16(inputs.unsqueeze(-1).unsqueeze(-1))  # Add dimensions for VGG16 input
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+
+        logger.info(f"Epoch [{epoch+1}/{epochs}], Loss: {running_loss:.4f}")
+
+    # Evaluation
+    vgg16.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for i in range(0, len(X_test), batch_size):
+            inputs = X_test[i:i + batch_size]
+            targets = y_test[i:i + batch_size]
+
+            outputs = vgg16(inputs.unsqueeze(-1).unsqueeze(-1))
+            _, predicted = torch.max(outputs, 1)
+            total += targets.size(0)
+            correct += (predicted == targets).sum().item()
+
+    accuracy = correct / total
+    logger.info(f"Test Accuracy: {accuracy:.4f}")
+
+    return vgg16, accuracy
+
+def train_mlp_on_features(features, labels, num_classes, epochs=10, batch_size=32, device=Config.DEVICE):
+    """
+    Train a simple MLP on the extracted features.
+    """
+    logger.info("Training MLP on extracted features...")
+
+    # Split data into training and testing sets
+    from sklearn.model_selection import train_test_split
+    X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
+
+    # Convert data to PyTorch tensors
+    X_train = torch.tensor(X_train, dtype=torch.float32).to(device)
+    X_test = torch.tensor(X_test, dtype=torch.float32).to(device)
+    y_train = torch.tensor(y_train, dtype=torch.long).to(device)
+    y_test = torch.tensor(y_test, dtype=torch.long).to(device)
+
+    # Define a simple MLP
+    class MLP(nn.Module):
+        def __init__(self, input_dim, hidden_dim, output_dim):
+            super(MLP, self).__init__()
+            self.fc1 = nn.Linear(input_dim, hidden_dim)
+            self.relu = nn.ReLU()
+            self.fc2 = nn.Linear(hidden_dim, output_dim)
+
+        def forward(self, x):
+            x = self.fc1(x)
+            x = self.relu(x)
+            x = self.fc2(x)
+            return x
+
+    model = MLP(input_dim=512, hidden_dim=256, output_dim=num_classes).to(device)
+
+    # Define loss function and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    # Training loop
+    for epoch in range(epochs):
+        model.train()
+        running_loss = 0.0
+        for i in range(0, len(X_train), batch_size):
+            inputs = X_train[i:i + batch_size]
+            targets = y_train[i:i + batch_size]
+
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+
+        logger.info(f"Epoch [{epoch+1}/{epochs}], Loss: {running_loss:.4f}")
+
+    # Evaluation
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for i in range(0, len(X_test), batch_size):
+            inputs = X_test[i:i + batch_size]
+            targets = y_test[i:i + batch_size]
+
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs, 1)
+            total += targets.size(0)
+            correct += (predicted == targets).sum().item()
+
+    accuracy = correct / total
+    logger.info(f"Test Accuracy: {accuracy:.4f}")
+
+    return model, accuracy
+
+
 # ================== Main Function ==================
 def main():
     # Setup paths
@@ -415,18 +550,27 @@ def main():
 
     visualize_augmentations(dataset)
 
-    # Initialize feature extractor
-    feature_extractor = FeatureExtractor(
-        base_model=Config.BASE_MODEL,
+    # Initialize ResNet50 for feature extraction
+    resnet50_feature_extractor = FeatureExtractor(
+        base_model="resnet50",
         feature_dim=Config.FEATURE_DIMENSIONS
     ).to(Config.DEVICE)
 
-    # Extract features
-    logger.info("Starting feature extraction...")
-    features, labels = extract_features(dataset, feature_extractor)
+    # Extract features with ResNet50
+    logger.info("Starting feature extraction with ResNet50...")
+    features, labels = extract_features_with_resnet50(dataset, resnet50_feature_extractor)
 
     logger.info(f"Features Shape: {features.shape}")
     logger.info(f"Labels Shape: {labels.shape}")
+
+    # Train VGG16 on the extracted features
+    num_classes = len(np.unique(labels))  # Determine the number of classes
+    # vgg16_model, accuracy = train_vgg16_on_features(features, labels, num_classes=num_classes)
+    mlp_model, accuracy = train_mlp_on_features(features, labels, num_classes=num_classes)
+
+    logger.info(f"Test Accuracy: {accuracy:.4f}")
+
+    logger.info("Feature extraction and training completed.")
 
 # Run the main function
 if __name__ == "__main__":
