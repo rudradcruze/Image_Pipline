@@ -44,5 +44,5 @@ dmypy.json
 
 # Pyre
 .pyre/
-.idea/
+*.idea/
 *.DS_Store
